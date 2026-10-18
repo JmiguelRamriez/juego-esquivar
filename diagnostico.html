@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Diagnóstico Gamepad</title>
+<style>
+  body { background: #0d1117; color: #e6edf3; font-family: monospace; padding: 24px; line-height: 1.8; }
+  .ok { color: #3fb950; }
+  .mal { color: #f85149; }
+  .info { color: #58a6ff; }
+  pre { background: #161b22; padding: 12px; border: 1px solid #30363d; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Diagnóstico de Gamepad API</h1>
+<div id="paso1"></div>
+<div id="paso2"></div>
+<div id="paso3"></div>
+<div id="paso4"></div>
+<pre id="log">Eventos (mueve joystick / pulsa botones):
+</pre>
+
+<script>
+(function () {
+  const log = document.getElementById('log');
+  const archivos = [];
+
+  function texto(id, contenido, clase) {
+    const el = document.getElementById(id);
+    el.innerHTML = contenido;
+    if (clase) el.className = clase;
+  }
+
+  function actualizar() {
+    // PASO 1: ¿La API existe en este navegador?
+    const apiExiste = typeof navigator.getGamepads === 'function' && typeof window.GamepadEvent !== 'undefined';
+    texto('paso1',
+      '1. Gamepad API disponible: ' + (apiExiste ? '<span class="ok">SI</span>' : '<span class="mal">NO (navegador la bloquea)</span>'),
+      apiExiste ? 'ok' : 'mal');
+
+    if (!apiExiste) return;
+
+    // PASO 2: ¿Cuántos gamepads ve navigator.getGamepads()?
+    const pads = navigator.getGamepads();
+    let visibles = [];
+    for (let i = 0; i < pads.length; i++) {
+      if (pads[i]) visibles.push(pads[i]);
+    }
+    texto('paso2',
+      '2. Gamepads visibles: ' + (visibles.length ? '<span class="ok">' + visibles.length + '</span>' : '<span class="mal">0 — el navegador NO ve ninguno</span>'));
+
+    // PASO 3: Detalles de cada gamepad
+    let detalle = '';
+    for (const p of visibles) {
+      const botones = p.buttons.map((b, i) => b.pressed ? i : null).filter(x => x !== null);
+      detalle += '<div class="info">[' + p.index + '] "' + p.id + '"' +
+        ' | ejes: ' + p.axes.length +
+        ' | botones: ' + p.buttons.length +
+        ' | mapeo: ' + p.mapping +
+        ' | conectados: ' + botones.join(',') +
+        ' | eje0: ' + (p.axes[0] || 0).toFixed(2) +
+        ' | eje1: ' + (p.axes[1] || 0).toFixed(2) + '</div>';
+    }
+    texto('paso3', detalle || '<span class="mal">Pulsa un BOTÓN del mando o mueve el joystick — hasta que interactúes el navegador lo oculta</span>');
+  }
+
+  // PASO 4: eventos de conexión
+  window.addEventListener('gamepadconnected', (e) => {
+    log.textContent += 'connected: [' + e.gamepad.index + '] ' + e.gamepad.id + '\n';
+  });
+  window.addEventListener('gamepaddisconnected', (e) => {
+    log.textContent += 'disconnected: [' + e.gamepad.index + '] ' + e.gamepad.id + '\n';
+  });
+
+  const intervalo = setInterval(actualizar, 200);
+
+  // Logear cambios de ejes y botones
+  let ejesAnteriores = {};
+  setInterval(() => {
+    if (typeof navigator.getGamepads !== 'function') return;
+    const pads = navigator.getGamepads();
+    for (let i = 0; i < pads.length; i++) {
+      const p = pads[i];
+      if (!p) continue;
+      const clave = i;
+      const firma = p.axes.join(',') + '|' + p.buttons.map(b => b.pressed ? 1 : 0).join('');
+      if (ejesAnteriores[clave] !== firma) {
+        ejesAnteriores[clave] = firma;
+        const ahora = new Date().toLocaleTimeString();
+        log.textContent = '[' + ahora + '] pad ' + i + ' ejes=[' + p.axes.map(a => (a || 0).toFixed(2)).join(', ') +
+          '] btns=' + p.buttons.map(b => b.pressed ? 1 : 0).join('') + '\n' +
+          log.textContent.length > 4000 ? '[ver arriba]\n' + log.textContent.slice(0, 4000) : log.textContent;
+      }
+    }
+  }, 100);
+})();
+</script>
+</body>
+</html>
