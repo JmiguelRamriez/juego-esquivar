@@ -111,14 +111,13 @@
 
 <div id="overlay">
   <h1 class="inicio">ESQUIVAR OBSTÁCULOS</h1>
-  <p>Controla la nave con el joystick izquierdo o las flechas del teclado</p>
+  <p>Controla la nave con el joystick izq., y con el der. apunta y dispara a los rojos</p>
   <p>Esquiva los obstáculos rojos y recoge los orbes verdes</p>
   <p class="instruccion">Mueve el joystick o pulsa una flecha para empezar</p>
 </div>
 
 <div id="controles">
-  Joystick izq. o Flechas = mover &nbsp;|&nbsp; Botón 1 o Espacio = impulso &nbsp;|&nbsp; Botón 2 o P = pausa<br>
-  ESP32 Gamepad BLE o teclado - funciona con cualquiera de los dos
+  Joystick izq. / Flechas = mover &nbsp;|&nbsp; Joystick der. = disparar &nbsp;|&nbsp; Botón 1 / Espacio = impulso &nbsp;|&nbsp; Botón 2 / P = pausa
 </div>
 
 <script>
@@ -131,6 +130,8 @@
   const VEL_JUGADOR = 4.5;    // velocidad base del cubo
   const VEL_IMPULSO = 11;     // velocidad extra al pulsar botón 1
   const IMPULSO_MS = 180;     // duración del impulso
+  const VEL_BALA = 8;         // velocidad de las balas
+  const COOLDOWN_BALA = 140;  // ms entre disparos
 
   const canvas = document.getElementById('juego');
   const ctx = canvas.getContext('2d');
@@ -151,8 +152,10 @@
   const jugador = { x: W / 2, y: H - 100, vx: 0, vy: 0, lado: 28 };
   const obstaculos = [];
   const orbes = [];
+  const balas = [];
 
   let ultimoImpulso = 0;
+  let ultimoDisparo = 0;
   let btnAnterior = [false, false, false, false];
   let gamepadConectado = false;
   let primerMovimientoDetectado = false;
@@ -258,6 +261,7 @@
     frame = 0;
     obstaculos.length = 0;
     orbes.length = 0;
+    balas.length = 0;
     jugador.x = W / 2;
     jugador.y = H - 100;
     jugador.vx = 0;
@@ -369,6 +373,20 @@
     jugador.x += jugador.vx;
     jugador.y += jugador.vy;
 
+    // Disparo con el joystick derecho: inclinar el stick dispara hacia esa dirección
+    if (pad) {
+      const ax2 = aplicaZonaMuerta(pad.axes[2] || 0);
+      const ax3 = aplicaZonaMuerta(pad.axes[3] || 0);
+      if ((Math.abs(ax2) > 0.3 || Math.abs(ax3) > 0.3) && ahora - ultimoDisparo > COOLDOWN_BALA) {
+        const mag = Math.hypot(ax2, ax3) || 1;
+        balas.push({
+          x: jugador.x, y: jugador.y,
+          vx: (ax2 / mag) * VEL_BALA, vy: (ax3 / mag) * VEL_BALA
+        });
+        ultimoDisparo = ahora;
+      }
+    }
+
     // Límites de pantalla
     const half = jugador.lado / 2;
     if (jugador.x < half) { jugador.x = half; jugador.vx = 0; }
@@ -406,6 +424,25 @@
             'gameover',
             '<p class="puntajeFinal">Máx dificultad alcanzada: ' + dificultad + '</p>'
           );
+        }
+      }
+    }
+
+    // Mover balas y comprobar choque contra obstáculos (destruirlos da puntos)
+    for (let i = balas.length - 1; i >= 0; i--) {
+      const b = balas[i];
+      b.x += b.vx;
+      b.y += b.vy;
+      if (b.x < 0 || b.x > W || b.y < 0 || b.y > H) { balas.splice(i, 1); continue; }
+      for (let j = obstaculos.length - 1; j >= 0; j--) {
+        const o = obstaculos[j];
+        if (b.x >= o.x && b.x <= o.x + o.w && b.y >= o.y && b.y <= o.y + o.h) {
+          obstaculos.splice(j, 1);
+          balas.splice(i, 1);
+          puntos++;
+          if (puntos % 5 === 0) dificultad = Math.min(dificultad + 1, 12);
+          actualizarHUD();
+          break;
         }
       }
     }
@@ -453,6 +490,14 @@
     for (const b of orbes) {
       ctx.beginPath();
       ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Balas (blancas)
+    ctx.fillStyle = '#e6edf3';
+    for (const b of balas) {
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, 3, 0, Math.PI * 2);
       ctx.fill();
     }
 
