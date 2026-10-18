@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Esquivar Obstáculos - ESP32 Gamepad</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #0d1117;
+    color: #e6edf3;
+    font-family: 'Courier New', monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+
+  canvas {
+    background: #0d1117;
+    border: 2px solid #30363d;
+    display: block;
+  }
+
+  #hud {
+    position: absolute;
+    top: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 40px;
+    font-size: 18px;
+    letter-spacing: 2px;
+  }
+
+  #hud span { color: #58a6ff; }
+  #hud .vidas { color: #f85149; }
+
+  #estado {
+    position: absolute;
+    bottom: 40px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 14px;
+    color: #8b949e;
+    letter-spacing: 1px;
+    text-align: center;
+  }
+
+  #estado.conectado { color: #3fb950; }
+
+  #debug {
+    position: absolute;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 12px;
+    color: #484f58;
+    letter-spacing: 1px;
+    text-align: center;
+  }
+
+  #overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: rgba(13, 17, 23, 0.92);
+    gap: 12px;
+  }
+
+  #overlay h1 { font-size: 36px; letter-spacing: 4px; }
+  #overlay h1.inicio { color: #58a6ff; }
+  #overlay h1.gameover { color: #f85149; }
+  #overlay h1.pausa { color: #d29922; }
+
+  #overlay p { color: #8b949e; font-size: 16px; }
+  #overlay .instruccion { color: #3fb950; margin-top: 16px; animation: parpadeo 1.2s infinite; }
+  #overlay .puntajeFinal { color: #e6edf3; font-size: 20px; margin-top: 8px; }
+
+  @keyframes parpadeo {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  #controles {
+    margin-top: 12px;
+    font-size: 12px;
+    color: #484f58;
+    text-align: center;
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <div>PUNTOS: <span id="puntos">0</span></div>
+  <div class="vidas">VIDAS: <span id="vidas">3</span></div>
+</div>
+
+<canvas id="juego" width="800" height="600"></canvas>
+
+<div id="estado">Buscando gamepad...</div>
+<div id="debug"></div>
+
+<div id="overlay">
+  <h1 class="inicio">ESQUIVAR OBSTÁCULOS</h1>
+  <p>Controla la nave con el joystick izquierdo o las flechas del teclado</p>
+  <p>Esquiva los obstáculos rojos y recoge los orbes verdes</p>
+  <p class="instruccion">Mueve el joystick o pulsa una flecha para empezar</p>
+</div>
+
+<div id="controles">
+  Joystick izq. o Flechas = mover &nbsp;|&nbsp; Botón 1 o Espacio = impulso &nbsp;|&nbsp; Botón 2 o P = pausa<br>
+  ESP32 Gamepad BLE o teclado - funciona con cualquiera de los dos
+</div>
+
+<script>
+(function () {
+  // ---------------------------------------------------------------------------
+  // CONFIGURACIÓN
+  // ---------------------------------------------------------------------------
+  const W = 800, H = 600;
+  const ZONA_MUERTA = 0.15;   // ruido mínimo del joystick
+  const VEL_JUGADOR = 4.5;    // velocidad base del cubo
+  const VEL_IMPULSO = 11;     // velocidad extra al pulsar botón 1
+  const IMPULSO_MS = 180;     // duración del impulso
+
+  const canvas = document.getElementById('juego');
+  const ctx = canvas.getContext('2d');
+  const overlay = document.getElementById('overlay');
+  const estadoEl = document.getElementById('estado');
+  const puntosEl = document.getElementById('puntos');
+  const vidasEl = document.getElementById('vidas');
+
+  // ---------------------------------------------------------------------------
+  // ESTADO DEL JUEGO
+  // ---------------------------------------------------------------------------
+  let modo = 'inicio';  // 'inicio' | 'jugando' | 'pausa' | 'gameover'
+  let puntos = 0;
+  let vidas = 3;
+  let dificultad = 1;   // 1..N, sube con los puntos
+  let frame = 0;
+
+  const jugador = { x: W / 2, y: H - 100, vx: 0, vy: 0, lado: 28 };
+  const obstaculos = [];
+  const orbes = [];
+
+  let ultimoImpulso = 0;
+  let btnAnterior = [false, false, false, false];
+  let gamepadConectado = false;
+  let primerMovimientoDetectado = false;
+
+  // ---------------------------------------------------------------------------
+  // TECLADO (para probar sin ESP32)
+  // ---------------------------------------------------------------------------
+  const teclas = {};
+  window.addEventListener('keydown', (e) => {
+    teclas[e.code] = true;
+    // Evitar que las flechas muevan la página
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
+      e.preventDefault();
+    }
+  });
+  window.addEventListener('keyup', (e) => { teclas[e.code] = false; });
+
+  function leerTeclado() {
+    let mx = 0, my = 0;
+    if (teclas['ArrowLeft'] || teclas['KeyA']) mx -= 1;
+    if (teclas['ArrowRight'] || teclas['KeyD']) mx += 1;
+    if (teclas['ArrowUp'] || teclas['KeyW']) my -= 1;
+    if (teclas['ArrowDown'] || teclas['KeyS']) my += 1;
+    // Normalizar diagonal
+    if (mx !== 0 && my !== 0) { mx *= 0.7071; my *= 0.7071; }
+    return { mx, my };
+  }
+
+  // ---------------------------------------------------------------------------
+  // GAMEPAD API - leer el ESP32 que se anuncia como gamepad BLE
+  // axes[0] = joystick izq X, axes[1] = joystick izq Y
+  // buttons[0] = botón 1 (GPIO 1), buttons[1] = botón 2 (GPIO 2), etc.
+  // ---------------------------------------------------------------------------
+  function leerGamepad() {
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    let mejor = null;
+    for (let i = 0; i < pads.length; i++) {
+      const p = pads[i];
+      if (!p) continue;
+      // Preferir el ESP32 por el id
+      const id = (p.id || '').toLowerCase();
+      if (id.includes('esp32') && p.axes.length >= 2) return p;
+      // Si no, preferir el que tenga 4+ ejes y 4+ botones
+      if (!mejor && p.axes.length >= 4 && p.buttons.length >= 4) mejor = p;
+      // Último recurso: el primer gamepad existente
+      if (!mejor) mejor = p;
+    }
+    return mejor;
+  }
+
+  function aplicaZonaMuerta(v) {
+    return Math.abs(v) < ZONA_MUERTA ? 0 : v;
+  }
+
+  function estadoBoton(p, i) {
+    if (!p || !p.buttons[i]) return false;
+    return p.buttons[i].pressed || p.buttons[i].value > 0.5;
+  }
+
+  // ---------------------------------------------------------------------------
+  // SPAWN DE OBSTÁCULOS Y ORBES
+  // ---------------------------------------------------------------------------
+  function spawnObstaculo() {
+    // Cuanto mayor la dificultad, más ancho y más rápido
+    const ancho = 24 + Math.random() * (30 + dificultad * 4);
+    const alto = 18 + Math.random() * 20;
+    obstaculos.push({
+      x: Math.random() * (W - ancho),
+      y: -alto,
+      w: ancho,
+      h: alto,
+      vy: (2 + Math.random() * 1.5) + dificultad * 0.6,
+      vx: (Math.random() - 0.5) * 0.8
+    });
+  }
+
+  function spawnOrbe() {
+    orbes.push({
+      x: 40 + Math.random() * (W - 80),
+      y: -20,
+      r: 10,
+      vy: 1.5 + dificultad * 0.3
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // COLISIONES (AABB vs círculo simplificado)
+  // ---------------------------------------------------------------------------
+  function colisionaCuadrado(ax, ay, aw, ah, bx, by, br) {
+    const cx = Math.max(ax, Math.min(bx, ax + aw));
+    const cy = Math.max(ay, Math.min(by, ay + ah));
+    const dx = bx - cx, dy = by - cy;
+    return (dx * dx + dy * dy) <= (br * br);
+  }
+
+  // ---------------------------------------------------------------------------
+  // REINICIO
+  // ---------------------------------------------------------------------------
+  function reiniciar() {
+    puntos = 0;
+    vidas = 3;
+    dificultad = 1;
+    frame = 0;
+    obstaculos.length = 0;
+    orbes.length = 0;
+    jugador.x = W / 2;
+    jugador.y = H - 100;
+    jugador.vx = 0;
+    jugador.vy = 0;
+    actualizarHUD();
+  }
+
+  function actualizarHUD() {
+    puntosEl.textContent = puntos;
+    vidasEl.textContent = vidas;
+  }
+
+  function mostrarOverlay(titulo, subtitulo, clase, extra) {
+    overlay.style.display = 'flex';
+    overlay.innerHTML =
+      '<h1 class="' + clase + '">' + titulo + '</h1>' +
+      '<p>' + subtitulo + '</p>' +
+      (extra || '') +
+      '<p class="instruccion">Mueve el joystick o pulsa una flecha para continuar</p>';
+  }
+
+  function ocultarOverlay() { overlay.style.display = 'none'; }
+
+  // ---------------------------------------------------------------------------
+  // UPDATE
+  // ---------------------------------------------------------------------------
+  function update() {
+    const pad = leerGamepad();
+    gamepadConectado = !!pad;
+
+    const debugEl = document.getElementById('debug');
+    if (!gamepadConectado) {
+      estadoEl.textContent = 'Sin gamepad - usa el teclado o empareja el ESP32';
+      estadoEl.classList.remove('conectado');
+      debugEl.textContent = 'Teclado: Flechas/WASD mover, Espacio impulso, P pausa';
+    } else {
+      estadoEl.textContent = 'ESP32 Gamepad conectado';
+      estadoEl.classList.add('conectado');
+      const ax0 = (pad.axes[0] || 0).toFixed(2);
+      const ax1 = (pad.axes[1] || 0).toFixed(2);
+      const ax2 = (pad.axes[2] || 0).toFixed(2);
+      const ax3 = (pad.axes[3] || 0).toFixed(2);
+      debugEl.textContent = 'ID: ' + pad.id +
+        ' | ejes: [' + ax0 + ', ' + ax1 + ', ' + ax2 + ', ' + ax3 + ']' +
+        ' | botones: ' + pad.buttons.filter(b => b.pressed).join(',');
+    }
+
+    // Leer joystick izquierdo + teclado (cualquiera de los dos sirve)
+    let mx = 0, my = 0;
+    if (pad) {
+      mx = aplicaZonaMuerta(pad.axes[0] || 0);
+      my = aplicaZonaMuerta(pad.axes[1] || 0);
+    }
+    const tec = leerTeclado();
+    if (Math.abs(tec.mx) > Math.abs(mx)) mx = tec.mx;
+    if (Math.abs(tec.my) > Math.abs(my)) my = tec.my;
+
+    // Detectar primer movimiento para iniciar el juego
+    if (!primerMovimientoDetectado && (Math.abs(mx) > 0.3 || Math.abs(my) > 0.3)) {
+      primerMovimientoDetectado = true;
+      if (modo === 'inicio') {
+        modo = 'jugando';
+        ocultarOverlay();
+      }
+    }
+
+    // Botones (gamepad o teclado)
+    const btn1 = estadoBoton(pad, 0) || teclas['Space'];        // impulso
+    const btn2 = estadoBoton(pad, 1) || teclas['KeyP'];         // pausa
+    const ahora = performance.now();
+
+    if (btn2 && !btnAnterior[1]) {
+      if (modo === 'jugando') {
+        modo = 'pausa';
+        mostrarOverlay('PAUSA', 'El juego está detenido', 'pausa');
+      } else if (modo === 'pausa') {
+        modo = 'jugando';
+        ocultarOverlay();
+      }
+    }
+
+    if (btn1 && !btnAnterior[0] && modo === 'jugando') {
+      ultimoImpulso = ahora;
+    }
+
+    if (modo === 'gameover') {
+      // Botón 1 o Enter reinicia (antes de guardar el estado anterior)
+      if ((btn1 && !btnAnterior[0]) || teclas['Enter']) {
+        teclas['Enter'] = false;
+        reiniciar();
+        modo = 'jugando';
+        ocultarOverlay();
+      }
+      btnAnterior[0] = btn1;
+      btnAnterior[1] = btn2;
+      return;
+    }
+
+    btnAnterior[0] = btn1;
+    btnAnterior[1] = btn2;
+
+    if (modo !== 'jugando') return;
+
+    // Movimiento del jugador con inercia suave
+    const enImpulso = (ahora - ultimoImpulso) < IMPULSO_MS;
+    const vel = enImpulso ? VEL_IMPULSO : VEL_JUGADOR;
+    jugador.vx += (mx * vel - jugador.vx) * 0.25;
+    jugador.vy += (my * vel - jugador.vy) * 0.25;
+    jugador.x += jugador.vx;
+    jugador.y += jugador.vy;
+
+    // Límites de pantalla
+    const half = jugador.lado / 2;
+    if (jugador.x < half) { jugador.x = half; jugador.vx = 0; }
+    if (jugador.x > W - half) { jugador.x = W - half; jugador.vx = 0; }
+    if (jugador.y < half) { jugador.y = half; jugador.vy = 0; }
+    if (jugador.y > H - half) { jugador.y = H - half; jugador.vy = 0; }
+
+    // Spawn progresivo
+    frame++;
+    const intervaloObst = Math.max(18, 50 - dificultad * 4);
+    const intervaloOrbe = Math.max(50, 110 - dificultad * 6);
+    if (frame % intervaloObst === 0) spawnObstaculo();
+    if (frame % intervaloOrbe === 0) spawnOrbe();
+
+    // Mover obstáculos y comprobar colisión con jugador
+    for (let i = obstaculos.length - 1; i >= 0; i--) {
+      const o = obstaculos[i];
+      o.x += o.vx;
+      o.y += o.vy;
+      if (o.y > H + 50) { obstaculos.splice(i, 1); continue; }
+      if (o.x < 0 || o.x + o.w > W) o.vx *= -1;
+
+      // Colisión AABB simple contra el cuadrado del jugador
+      const hx = jugador.x - half, hy = jugador.y - half;
+      if (hx < o.x + o.w && hx + jugador.lado > o.x &&
+          hy < o.y + o.h && hy + jugador.lado > o.y) {
+        vidas--;
+        obstaculos.splice(i, 1);
+        actualizarHUD();
+        if (vidas <= 0) {
+          modo = 'gameover';
+          mostrarOverlay(
+            'GAME OVER',
+            'Puntuación final: ' + puntos,
+            'gameover',
+            '<p class="puntajeFinal">Máx dificultad alcanzada: ' + dificultad + '</p>'
+          );
+        }
+      }
+    }
+
+    // Mover orbes y comprobar recolección
+    for (let i = orbes.length - 1; i >= 0; i--) {
+      const b = orbes[i];
+      b.y += b.vy;
+      if (b.y > H + 30) { orbes.splice(i, 1); continue; }
+
+      if (colisionaCuadrado(jugador.x - half, jugador.y - half, jugador.lado, jugador.lado, b.x, b.y, b.r)) {
+        orbes.splice(i, 1);
+        puntos++;
+        // Subir dificultad cada 5 puntos
+        if (puntos % 5 === 0) dificultad = Math.min(dificultad + 1, 12);
+        actualizarHUD();
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // RENDER
+  // ---------------------------------------------------------------------------
+  function render() {
+    ctx.clearRect(0, 0, W, H);
+
+    // Fondo sutil con cuadrícula
+    ctx.strokeStyle = 'rgba(48, 54, 61, 0.4)';
+    ctx.lineWidth = 1;
+    for (let x = 0; x <= W; x += 40) {
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    }
+    for (let y = 0; y <= H; y += 40) {
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    }
+
+    // Obstáculos (rojo)
+    ctx.fillStyle = '#f85149';
+    for (const o of obstaculos) {
+      ctx.fillRect(o.x, o.y, o.w, o.h);
+    }
+
+    // Orbes (verde)
+    ctx.fillStyle = '#3fb950';
+    for (const b of orbes) {
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Jugador (cian) - cuadrado con un pequeño detalle
+    ctx.fillStyle = '#58a6ff';
+    const half = jugador.lado / 2;
+    ctx.fillRect(jugador.x - half, jugador.y - half, jugador.lado, jugador.lado);
+    ctx.fillStyle = '#0d1117';
+    ctx.fillRect(jugador.x - 4, jugador.y - 4, 8, 8);
+
+    // Indicador de impulso
+    if (performance.now() - ultimoImpulso < IMPULSO_MS) {
+      ctx.strokeStyle = '#3fb950';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(jugador.x - half - 4, jugador.y - half - 4, jugador.lado + 8, jugador.lado + 8);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // LOOP PRINCIPAL
+  // ---------------------------------------------------------------------------
+  function loop() {
+    update();
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  // ---------------------------------------------------------------------------
+  // EVENTOS
+  // ---------------------------------------------------------------------------
+  window.addEventListener('gamepadconnected', (e) => {
+    console.log('Gamepad conectado:', e.gamepad.id);
+    estadoEl.textContent = 'ESP32 Gamepad conectado';
+    estadoEl.classList.add('conectado');
+  });
+
+  window.addEventListener('gamepaddisconnected', (e) => {
+    console.log('Gamepad desconectado:', e.gamepad.id);
+    estadoEl.textContent = 'Gamepad desconectado - reconecta el ESP32';
+    estadoEl.classList.remove('conectado');
+  });
+
+  // Empezar
+  loop();
+})();
+</script>
+</body>
+</html>
